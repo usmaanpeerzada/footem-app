@@ -59,7 +59,7 @@ async function handleBroadcasts(matchUrl) {
     const broadHtml = await broadResp.text();
 
     const links = [];
-    const linkRegex = /<a[^>]+href="([^"]+)"[^>]*>(LINK[\s\S]*?)<\/a>/gi;
+    const linkRegex = /<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
     let m;
     while ((m = linkRegex.exec(broadHtml)) !== null) {
       const text = m[2].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
