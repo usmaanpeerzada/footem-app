@@ -1,11 +1,19 @@
 export async function onRequest(context) {
   const matchUrl = new URL(context.request.url).searchParams.get('url');
+
+  const corsHeaders = {
+    'Access-Control-Allow-Origin': '*',
+    'Content-Type': 'application/json',
+  };
+
   if (!matchUrl) {
-    return Response.json({ error: 'Missing url param' }, { status: 400 });
+    return new Response(JSON.stringify({ error: 'Missing url param' }), { status: 400, headers: corsHeaders });
   }
 
   const HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
   };
 
   try {
@@ -13,21 +21,20 @@ export async function onRequest(context) {
     const matchResp = await fetch(matchUrl, { headers: HEADERS });
     const matchHtml = await matchResp.text();
 
-    // The CLICK HERE image src contains "CLICK_HERE"
     const clickHereRegex = /<a[^>]+href="([^"]+)"[^>]*>\s*<img[^>]+src="[^"]*CLICK[^"]*"[^>]*\/?>\s*<\/a>/i;
     const clickMatch = matchHtml.match(clickHereRegex);
 
     if (!clickMatch) {
-      return Response.json({ error: 'Broadcast link not found on this match page yet.' }, { status: 404 });
+      return new Response(JSON.stringify({ error: 'Stream links not available for this match yet.' }), { status: 404, headers: corsHeaders });
     }
 
     const broadcastUrl = new URL(clickMatch[1], matchUrl).href;
 
-    // Step 2: fetch broadcast page, extract stream links + channels table
+    // Step 2: fetch broadcast page, extract stream links + channels
     const broadResp = await fetch(broadcastUrl, { headers: HEADERS });
     const broadHtml = await broadResp.text();
 
-    // Extract LINK 1, LINK 2... anchors
+    // Extract LINK 1, LINK 2...
     const links = [];
     const linkRegex = /<a[^>]+href="([^"]+)"[^>]*>(LINK[\s\S]*?)<\/a>/gi;
     let m;
@@ -38,7 +45,7 @@ export async function onRequest(context) {
       }
     }
 
-    // Extract country/channel table rows
+    // Extract country/channel table
     const channels = [];
     const tableRegex = /<table[\s\S]*?<\/table>/i;
     const tableMatch = broadHtml.match(tableRegex);
@@ -47,7 +54,7 @@ export async function onRequest(context) {
       let rowM;
       let first = true;
       while ((rowM = rowRegex.exec(tableMatch[0])) !== null) {
-        if (first) { first = false; continue; } // skip header
+        if (first) { first = false; continue; }
         const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
         const cells = [];
         let cellM;
@@ -61,10 +68,8 @@ export async function onRequest(context) {
       }
     }
 
-    return Response.json({ links, channels, broadcast_url: broadcastUrl }, {
-      headers: { 'Access-Control-Allow-Origin': '*' }
-    });
+    return new Response(JSON.stringify({ links, channels, broadcast_url: broadcastUrl }), { headers: corsHeaders });
   } catch (e) {
-    return Response.json({ error: e.message }, { status: 500 });
+    return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: corsHeaders });
   }
 }
