@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Footem Live</title>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -79,17 +80,48 @@
 
     .stream-link {
       display: block;
+      width: 100%;
+      text-align: left;
       background: #ff0808;
       color: #fff;
       text-decoration: none;
+      border: none;
       padding: 12px 16px;
       border-radius: 6px;
       margin-bottom: 10px;
       font-weight: 600;
       font-size: 0.9rem;
+      cursor: pointer;
       transition: background 0.2s;
     }
     .stream-link:hover { background: #cc0606; }
+
+    #player-section { display: none; }
+    #back-to-links {
+      background: none; border: none; color: #aaa;
+      cursor: pointer; font-size: 0.85rem; padding: 0 0 12px;
+      display: block;
+    }
+    #back-to-links:hover { color: #fff; }
+    #player-wrapper {
+      position: relative; width: 100%; padding-top: 56.25%;
+      background: #000; border-radius: 6px; overflow: hidden;
+    }
+    #stream-video {
+      position: absolute; top: 0; left: 0;
+      width: 100%; height: 100%;
+    }
+    #stream-status {
+      position: absolute; top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      color: #aaa; font-size: 0.9rem; text-align: center; width: 90%;
+    }
+    #open-new-tab {
+      display: inline-block; margin-top: 10px;
+      color: #666; font-size: 0.78rem; text-decoration: none;
+    }
+    #open-new-tab:hover { color: #aaa; }
+    #modal.player-mode { max-width: 860px; }
 
     .channels-section { margin-top: 20px; }
     .channels-section h3 { font-size: 0.85rem; color: #888; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
@@ -137,6 +169,14 @@
       <h2 id="modal-title"></h2>
       <div id="modal-loading">Fetching stream links...</div>
       <div id="modal-content"></div>
+      <div id="player-section">
+        <button id="back-to-links">← Back to streams</button>
+        <div id="player-wrapper">
+          <video id="stream-video" controls playsinline></video>
+          <div id="stream-status">Finding stream...</div>
+        </div>
+        <a id="open-new-tab" href="#" target="_blank" rel="noopener">↗ Not playing? Open in new tab</a>
+      </div>
     </div>
   </div>
 
@@ -182,10 +222,73 @@
       el.style.display = 'block';
     }
 
+    let hlsInstance = null;
+
+    function stopPlayer() {
+      if (hlsInstance) { hlsInstance.destroy(); hlsInstance = null; }
+      const v = document.getElementById('stream-video');
+      v.pause(); v.src = '';
+    }
+
+    function tryStream(streams, idx) {
+      const status = document.getElementById('stream-status');
+      const video = document.getElementById('stream-video');
+      if (idx >= streams.length) {
+        status.textContent = 'All streams unavailable. Try opening in new tab.';
+        status.style.display = 'block';
+        return;
+      }
+      if (hlsInstance) { hlsInstance.destroy(); hlsInstance = null; }
+      const proxied = '/api/proxy?url=' + encodeURIComponent(streams[idx]);
+      if (Hls.isSupported()) {
+        hlsInstance = new Hls({ enableWorker: false });
+        hlsInstance.loadSource(proxied);
+        hlsInstance.attachMedia(video);
+        hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => { status.style.display = 'none'; video.play(); });
+        hlsInstance.on(Hls.Events.ERROR, (evt, d) => {
+          if (d.fatal) tryStream(streams, idx + 1);
+        });
+      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = proxied; video.play(); status.style.display = 'none';
+      } else {
+        status.textContent = 'HLS not supported in this browser.'; status.style.display = 'block';
+      }
+    }
+
+    function playStream(linkUrl) {
+      document.getElementById('modal-content').style.display = 'none';
+      document.getElementById('player-section').style.display = 'block';
+      document.getElementById('modal').classList.add('player-mode');
+      document.getElementById('open-new-tab').href = linkUrl;
+      const status = document.getElementById('stream-status');
+      status.textContent = 'Finding stream...';
+      status.style.display = 'block';
+      stopPlayer();
+
+      fetch('/api/stream?url=' + encodeURIComponent(linkUrl))
+        .then(r => r.json())
+        .then(data => {
+          if (data.error) { status.textContent = 'No stream found. Try opening in new tab.'; return; }
+          tryStream(data.all || [data.m3u8], 0);
+        })
+        .catch(e => { status.textContent = 'Error: ' + e.message; });
+    }
+
+    document.getElementById('back-to-links').onclick = function() {
+      stopPlayer();
+      document.getElementById('player-section').style.display = 'none';
+      document.getElementById('modal-content').style.display = 'block';
+      document.getElementById('modal').classList.remove('player-mode');
+    };
+
     async function openMatch(match) {
       document.getElementById('modal-title').textContent = match.title;
       document.getElementById('modal-loading').style.display = 'block';
       document.getElementById('modal-content').innerHTML = '';
+      document.getElementById('modal-content').style.display = 'block';
+      stopPlayer();
+      document.getElementById('player-section').style.display = 'none';
+      document.getElementById('modal').classList.remove('player-mode');
       document.getElementById('modal-overlay').classList.add('open');
 
       try {
@@ -203,7 +306,7 @@
 
         if (data.links && data.links.length) {
           data.links.forEach(link => {
-            html += `<a class="stream-link" href="${link.url}" target="_blank" rel="noopener">${link.text}</a>`;
+            html += `<button class="stream-link" onclick="playStream(this.dataset.url)" data-url="${link.url}">${link.text} ▶</button>`;
           });
         } else {
           html += '<div style="color:#888">No stream links found for this match yet.</div>';
@@ -227,6 +330,10 @@
     function closeModal(e) {
       if (!e || e.target === document.getElementById('modal-overlay') || e.currentTarget === document.getElementById('modal-close')) {
         document.getElementById('modal-overlay').classList.remove('open');
+        stopPlayer();
+        document.getElementById('player-section').style.display = 'none';
+        document.getElementById('modal-content').style.display = 'block';
+        document.getElementById('modal').classList.remove('player-mode');
       }
     }
 

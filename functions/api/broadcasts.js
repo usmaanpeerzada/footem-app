@@ -21,8 +21,8 @@ export async function onRequest(context) {
     const matchResp = await fetch(matchUrl, { headers: HEADERS });
     const matchHtml = await matchResp.text();
 
-    const clickHereRegex = /<a[^>]+href="([^"]+)"[^>]*>\s*<img[^>]+src="[^"]*CLICK[^"]*"[^>]*\/?>\s*<\/a>/i;
-    const clickMatch = matchHtml.match(clickHereRegex);
+    const clickMatch = matchHtml.match(/<a[^>]+href="([^"]+)"[^>]*>\s*<img[^>]+src="[^"]*CLICK[^"]*"[^>]*\/?>\s*<\/a>/i)
+      || matchHtml.match(/<a[^>]+href="([^"]+)"[^>]*>[^<]*TV Channel[^<]*<\/a>/i);
 
     if (!clickMatch) {
       return new Response(JSON.stringify({ error: 'Stream links not available for this match yet.' }), { status: 404, headers: corsHeaders });

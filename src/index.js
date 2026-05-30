@@ -51,7 +51,8 @@ async function handleBroadcasts(matchUrl) {
     const matchResp = await fetch(matchUrl, { headers: HEADERS });
     const matchHtml = await matchResp.text();
 
-    const clickMatch = matchHtml.match(/<a[^>]+href="([^"]+)"[^>]*>\s*<img[^>]+src="[^"]*CLICK[^"]*"[^>]*\/?>\s*<\/a>/i);
+    const clickMatch = matchHtml.match(/<a[^>]+href="([^"]+)"[^>]*>\s*<img[^>]+src="[^"]*CLICK[^"]*"[^>]*\/?>\s*<\/a>/i)
+      || matchHtml.match(/<a[^>]+href="([^"]+)"[^>]*>[^<]*TV Channel[^<]*<\/a>/i);
     if (!clickMatch) return jsonResponse({ error: 'Stream links not available for this match yet.' }, 404);
 
     const broadcastUrl = new URL(clickMatch[1], matchUrl).href;
@@ -89,12 +90,84 @@ async function handleBroadcasts(matchUrl) {
   }
 }
 
+async function handleProxy(targetUrl) {
+  if (!targetUrl) return new Response('Missing url', { status: 400, headers: { 'Access-Control-Allow-Origin': '*' } });
+  try {
+    const parsed = new URL(targetUrl);
+    const fetchHeaders = {
+      ...HEADERS,
+      'Referer': parsed.origin + '/',
+      'Origin': parsed.origin,
+    };
+    const resp = await fetch(targetUrl, { headers: fetchHeaders });
+    const contentType = resp.headers.get('content-type') || '';
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+    };
+
+    const isM3u8 = targetUrl.includes('.m3u8') || contentType.includes('mpegurl') || contentType.includes('x-mpegurl');
+    if (isM3u8) {
+      const text = await resp.text();
+      if (!text.trim().startsWith('#EXTM3U')) {
+        return new Response(JSON.stringify({ error: 'Stream not available' }), { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      const base = parsed.href.substring(0, parsed.href.lastIndexOf('/') + 1);
+      const rewritten = text.split('\n').map(line => {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) return line;
+        let abs;
+        if (trimmed.startsWith('http')) abs = trimmed;
+        else if (trimmed.startsWith('/')) abs = parsed.origin + trimmed;
+        else abs = base + trimmed;
+        return '/api/proxy?url=' + encodeURIComponent(abs);
+      }).join('\n');
+      return new Response(rewritten, { headers: { ...corsHeaders, 'Content-Type': 'application/vnd.apple.mpegurl' } });
+    }
+
+    const out = new Headers(corsHeaders);
+    ['content-type', 'content-length', 'content-range'].forEach(h => {
+      const v = resp.headers.get(h);
+      if (v) out.set(h, v);
+    });
+    return new Response(resp.body, { status: resp.status, headers: out });
+  } catch (e) {
+    return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' } });
+  }
+}
+
+async function handleStream(linkUrl) {
+  if (!linkUrl) return jsonResponse({ error: 'Missing url param' }, 400);
+  try {
+    const resp = await fetch(linkUrl, { headers: HEADERS });
+    const html = await resp.text();
+
+    const m3u8Regex = /https?:\/\/[^"'\s<>\\]+\.m3u8[^"'\s<>\\]*/g;
+    const raw = html.match(m3u8Regex) || [];
+
+    const resolved = [...new Set(raw.map(u => {
+      const inner = u.match(/[?&](?:url|src)=(https?:\/\/[^&"'\s]+\.m3u8[^&"'\s]*)/i);
+      return inner ? decodeURIComponent(inner[1]) : u;
+    }))];
+
+    // Prefer direct m3u8 streams over wrapper page URLs
+    const direct = resolved.filter(u => !/\.html/i.test(u.split('?')[0]));
+    const streams = direct.length ? direct : resolved;
+
+    if (!streams.length) return jsonResponse({ error: 'No stream found on this page' });
+    return jsonResponse({ m3u8: streams[0], all: streams });
+  } catch (e) {
+    return jsonResponse({ error: e.message }, 500);
+  }
+}
+
 const HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Footem Live</title>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #111; color: #eee; font-family: 'Segoe UI', sans-serif; min-height: 100vh; }
@@ -114,8 +187,17 @@ const HTML = `<!DOCTYPE html>
     #modal-close:hover { color: #fff; }
     #modal h2 { font-size: 1.05rem; margin-bottom: 16px; color: #fff; padding-right: 24px; }
     #modal-loading { text-align: center; color: #aaa; padding: 24px 0; }
-    .stream-link { display: block; background: #ff0808; color: #fff; text-decoration: none; padding: 12px 16px; border-radius: 6px; margin-bottom: 10px; font-weight: 600; font-size: 0.9rem; transition: background 0.2s; }
+    .stream-link { display: block; width: 100%; text-align: left; background: #ff0808; color: #fff; text-decoration: none; border: none; padding: 12px 16px; border-radius: 6px; margin-bottom: 10px; font-weight: 600; font-size: 0.9rem; cursor: pointer; transition: background 0.2s; }
     .stream-link:hover { background: #cc0606; }
+    #player-section { display: none; }
+    #back-to-links { background: none; border: none; color: #aaa; cursor: pointer; font-size: 0.85rem; padding: 0 0 12px; display: block; }
+    #back-to-links:hover { color: #fff; }
+    #player-wrapper { position: relative; width: 100%; padding-top: 56.25%; background: #000; border-radius: 6px; overflow: hidden; }
+    #stream-video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+    #stream-status { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); color: #aaa; font-size: 0.9rem; text-align: center; width: 90%; }
+    #open-new-tab { display: inline-block; margin-top: 10px; color: #666; font-size: 0.78rem; text-decoration: none; }
+    #open-new-tab:hover { color: #aaa; }
+    #modal.player-mode { max-width: 860px; }
     .channels-section { margin-top: 20px; }
     .channels-section h3 { font-size: 0.85rem; color: #888; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
     .channel-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #2a2a2a; font-size: 0.85rem; }
@@ -143,6 +225,14 @@ const HTML = `<!DOCTYPE html>
       <h2 id="modal-title"></h2>
       <div id="modal-loading">Fetching stream links...</div>
       <div id="modal-content"></div>
+      <div id="player-section">
+        <button id="back-to-links">← Back to streams</button>
+        <div id="player-wrapper">
+          <video id="stream-video" controls playsinline></video>
+          <div id="stream-status">Finding stream...</div>
+        </div>
+        <a id="open-new-tab" href="#" target="_blank" rel="noopener">↗ Not playing? Open in new tab</a>
+      </div>
     </div>
   </div>
   <script>
@@ -174,10 +264,67 @@ const HTML = `<!DOCTYPE html>
       el.textContent = msg;
       el.style.display = 'block';
     }
+    var hlsInstance = null;
+    function stopPlayer() {
+      if (hlsInstance) { hlsInstance.destroy(); hlsInstance = null; }
+      var v = document.getElementById('stream-video');
+      v.pause(); v.src = '';
+    }
+    function tryStream(streams, idx) {
+      var status = document.getElementById('stream-status');
+      var video = document.getElementById('stream-video');
+      if (idx >= streams.length) {
+        status.textContent = 'All streams unavailable. Try opening in new tab.';
+        status.style.display = 'block';
+        return;
+      }
+      if (hlsInstance) { hlsInstance.destroy(); hlsInstance = null; }
+      var proxied = '/api/proxy?url=' + encodeURIComponent(streams[idx]);
+      if (typeof Hls !== 'undefined' && Hls.isSupported()) {
+        hlsInstance = new Hls({ enableWorker: false });
+        hlsInstance.loadSource(proxied);
+        hlsInstance.attachMedia(video);
+        hlsInstance.on(Hls.Events.MANIFEST_PARSED, function() { status.style.display = 'none'; video.play(); });
+        hlsInstance.on(Hls.Events.ERROR, function(evt, d) {
+          if (d.fatal) { tryStream(streams, idx + 1); }
+        });
+      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = proxied; video.play(); status.style.display = 'none';
+      } else {
+        status.textContent = 'HLS not supported in this browser.'; status.style.display = 'block';
+      }
+    }
+    function playStream(linkUrl) {
+      document.getElementById('modal-content').style.display = 'none';
+      document.getElementById('player-section').style.display = 'block';
+      document.getElementById('modal').classList.add('player-mode');
+      document.getElementById('open-new-tab').href = linkUrl;
+      var status = document.getElementById('stream-status');
+      status.textContent = 'Finding stream...';
+      status.style.display = 'block';
+      stopPlayer();
+      fetch('/api/stream?url=' + encodeURIComponent(linkUrl))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (data.error) { status.textContent = 'No stream found. Try opening in new tab.'; return; }
+          tryStream(data.all || [data.m3u8], 0);
+        })
+        .catch(function(e) { status.textContent = 'Error: ' + e.message; });
+    }
+    document.getElementById('back-to-links').onclick = function() {
+      stopPlayer();
+      document.getElementById('player-section').style.display = 'none';
+      document.getElementById('modal-content').style.display = 'block';
+      document.getElementById('modal').classList.remove('player-mode');
+    };
     async function openMatch(match) {
       document.getElementById('modal-title').textContent = match.title;
       document.getElementById('modal-loading').style.display = 'block';
       document.getElementById('modal-content').innerHTML = '';
+      document.getElementById('modal-content').style.display = 'block';
+      stopPlayer();
+      document.getElementById('player-section').style.display = 'none';
+      document.getElementById('modal').classList.remove('player-mode');
       document.getElementById('modal-overlay').classList.add('open');
       try {
         const res = await fetch('/api/broadcasts?url=' + encodeURIComponent(match.url));
@@ -186,7 +333,7 @@ const HTML = `<!DOCTYPE html>
         if (data.error) { document.getElementById('modal-content').innerHTML = '<div style="color:#ff6b6b">' + data.error + '</div>'; return; }
         let html = '';
         if (data.links && data.links.length) {
-          data.links.forEach(link => { html += '<a class="stream-link" href="' + link.url + '" target="_blank" rel="noopener">' + link.text + '</a>'; });
+          data.links.forEach(link => { html += '<button class="stream-link" onclick="playStream(this.dataset.url)" data-url="' + link.url + '">' + link.text + ' ▶</button>'; });
         } else { html += '<div style="color:#888">No stream links found for this match yet.</div>'; }
         if (data.channels && data.channels.length) {
           html += '<div class="channels-section"><h3>Official Broadcasters</h3>';
@@ -202,6 +349,10 @@ const HTML = `<!DOCTYPE html>
     function closeModal(e) {
       if (!e || e.target === document.getElementById('modal-overlay') || e.currentTarget === document.getElementById('modal-close')) {
         document.getElementById('modal-overlay').classList.remove('open');
+        stopPlayer();
+        document.getElementById('player-section').style.display = 'none';
+        document.getElementById('modal-content').style.display = 'block';
+        document.getElementById('modal').classList.remove('player-mode');
       }
     }
     loadMatches();
@@ -223,6 +374,15 @@ export default {
 
     if (url.pathname === '/api/broadcasts') {
       return handleBroadcasts(url.searchParams.get('url'));
+    }
+
+    if (url.pathname === '/api/proxy') {
+      if (request.method === 'OPTIONS') return new Response(null, { headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS' } });
+      return handleProxy(url.searchParams.get('url'));
+    }
+
+    if (url.pathname === '/api/stream') {
+      return handleStream(url.searchParams.get('url'));
     }
 
     return new Response('Not found', { status: 404 });
